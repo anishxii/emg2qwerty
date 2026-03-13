@@ -240,6 +240,49 @@ class TDSFullyConnectedBlock(nn.Module):
         return self.layer_norm(x)  # TNC
 
 
+class CNNEncoder(nn.Module):
+    """A 1D convolutional encoder that processes temporal EMG features.
+
+    Each block: Conv1d → BatchNorm1d → ReLU → Dropout.
+    Uses same-padding (no temporal downsampling) so T_out == T_in.
+
+    Args:
+        in_features: Number of input channels (feature dim).
+        num_channels: Number of output channels for each Conv1d layer.
+        num_layers: Number of Conv1d blocks.
+        kernel_size: Kernel size (must be odd for symmetric same-padding).
+        dropout: Dropout probability after each block.
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        num_channels: int = 256,
+        num_layers: int = 3,
+        kernel_size: int = 5,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        assert kernel_size % 2 == 1, "kernel_size must be odd for same-padding"
+
+        layers: list[nn.Module] = []
+        for i in range(num_layers):
+            in_ch = in_features if i == 0 else num_channels
+            layers.extend([
+                nn.Conv1d(in_ch, num_channels, kernel_size, padding=kernel_size // 2),
+                nn.BatchNorm1d(num_channels),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+            ])
+        self.conv_layers = nn.Sequential(*layers)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        # inputs: (T, N, C) -> (N, C, T) for Conv1d -> back to (T, N, C)
+        x = inputs.permute(1, 2, 0)
+        x = self.conv_layers(x)
+        return x.permute(2, 0, 1)
+
+
 class TDSConvEncoder(nn.Module):
     """A time depth-separable convolutional encoder composing a sequence
     of `TDSConv2dBlock` and `TDSFullyConnectedBlock` as per
