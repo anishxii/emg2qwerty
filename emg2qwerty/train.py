@@ -13,6 +13,7 @@ from typing import Any
 
 import hydra
 import pytorch_lightning as pl
+from pytorch_lightning.loggers import WandbLogger
 from hydra.utils import get_original_cwd, instantiate
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
@@ -90,10 +91,19 @@ def main(config: DictConfig):
     callback_configs = config.get("callbacks", [])
     callbacks = [instantiate(cfg) for cfg in callback_configs]
 
+    # Initialize wandb logger
+    wandb_logger = WandbLogger(
+        project="emg2qwerty",
+        name=os.environ.get("WANDB_RUN_NAME", None),
+        config=OmegaConf.to_container(config, resolve=True),
+        save_dir=config.trainer.get("default_root_dir", "logs"),
+    )
+
     # Initialize trainer
     trainer = pl.Trainer(
         **config.trainer,
         callbacks=callbacks,
+        logger=wandb_logger,
     )
 
     if config.train:
