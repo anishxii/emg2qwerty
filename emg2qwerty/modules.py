@@ -170,6 +170,50 @@ class MultiBandRotationInvariantMLP(nn.Module):
         return torch.stack(outputs_per_band, dim=self.stack_dim)
 
 
+class CrossBandAttention(nn.Module):
+    """Cross-attention between left and right EMG bands.
+
+    After the per-band MLP, each band's temporal sequence attends to the
+    opposite band's temporal sequence. This explicitly models bilateral
+    motor coordination — the left and right hands are not independent
+    during typing.
+
+    Input/output shape: (T, N, 2, d_model)
+
+    Args:
+        d_model: Feature dimension of each band (mlp_features[-1]).
+        nhead: Number of attention heads.
+        dropout: Dropout applied after attention and in residual.
+    """
+
+    def __init__(self, d_model: int, nhead: int = 4, dropout: float = 0.1) -> None:
+        super().__init__()
+        self.left_to_right = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=False
+        )
+        self.right_to_left = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=False
+        )
+        self.norm_left = nn.LayerNorm(d_model)
+        self.norm_right = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        # inputs: (T, N, 2, d)
+        left = inputs[:, :, 0, :]   # (T, N, d)
+        right = inputs[:, :, 1, :]  # (T, N, d)
+
+        # Each band queries the other's full temporal sequence
+        left_ctx, _ = self.left_to_right(query=left, key=right, value=right)
+        right_ctx, _ = self.right_to_left(query=right, key=left, value=left)
+
+        # Residual + norm
+        left_out = self.norm_left(left + self.dropout(left_ctx))
+        right_out = self.norm_right(right + self.dropout(right_ctx))
+
+        return torch.stack([left_out, right_out], dim=2)  # (T, N, 2, d)
+
+
 class TDSConv2dBlock(nn.Module):
     """A 2D temporal convolution block as per "Sequence-to-Sequence Speech
     Recognition with Time-Depth Separable Convolutions, Hannun et al"
