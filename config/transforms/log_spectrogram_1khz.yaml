@@ -1,0 +1,47 @@
+# @package _global_
+# Simulates 1kHz sampling rate via 2x decimation of the 2kHz EMG signal.
+to_tensor:
+  _target_: emg2qwerty.transforms.ToTensor
+  fields: [emg_left, emg_right]
+
+decimate:
+  _target_: emg2qwerty.transforms.Decimate
+  factor: 2
+
+band_rotation:
+  _target_: emg2qwerty.transforms.ForEach
+  transform:
+    _target_: emg2qwerty.transforms.RandomBandRotation
+    offsets: [-1, 0, 1]
+
+temporal_jitter:
+  _target_: emg2qwerty.transforms.TemporalAlignmentJitter
+  max_offset: 60  # Scaled: 60ms jitter at 1kHz (same wall-clock time as 120 at 2kHz)
+
+logspec:
+  _target_: emg2qwerty.transforms.LogSpectrogram
+  n_fft: 64
+  hop_length: 16
+
+specaug:
+  _target_: emg2qwerty.transforms.SpecAugment
+  n_time_masks: 3
+  time_mask_param: 13  # Scaled proportionally with frame rate
+  n_freq_masks: 2
+  freq_mask_param: 4
+
+transforms:
+  train:
+    - ${to_tensor}
+    - ${decimate}
+    - ${band_rotation}
+    - ${temporal_jitter}
+    - ${logspec}
+    - ${specaug}
+
+  val:
+    - ${to_tensor}
+    - ${decimate}
+    - ${logspec}
+
+  test: ${transforms.val}

@@ -190,6 +190,44 @@ class LogSpectrogram:
 
 
 @dataclass
+class ChannelSubsample:
+    """Subsamples electrode channels per band by taking the first ``n_channels``
+    channels. Applied after ``ToTensor`` on inputs of shape (T, bands, C, ...).
+
+    Args:
+        n_channels (int): Number of electrode channels to keep per band.
+    """
+
+    n_channels: int
+    band_dim: int = 1
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        # tensor: (T, bands=2, C, ...) — slice C dimension
+        idx = [slice(None)] * tensor.ndim
+        idx[self.band_dim + 1] = slice(self.n_channels)
+        return tensor[tuple(idx)]
+
+
+@dataclass
+class Decimate:
+    """Downsamples the EMG signal along the time axis by an integer factor.
+    Applied before ``LogSpectrogram`` to simulate lower sampling rates.
+
+    Note: This is a naive stride-based decimate (no anti-aliasing filter).
+    Sufficient for ablation purposes.
+
+    Args:
+        factor (int): Downsampling factor (2 → 1kHz from 2kHz, 4 → 500Hz).
+    """
+
+    factor: int
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        # tensor: (T, ...) — subsample time dimension
+        return tensor[:: self.factor]
+
+
+@dataclass
 class SpecAugment:
     """Applies time and frequency masking as per the paper
     "SpecAugment: A Simple Data Augmentation Method for Automatic Speech

@@ -293,6 +293,7 @@ class CNNBiLSTMCTCModule(pl.LightningModule):
         optimizer: DictConfig,
         lr_scheduler: DictConfig,
         decoder: DictConfig,
+        electrode_channels: int = 16,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -301,7 +302,7 @@ class CNNBiLSTMCTCModule(pl.LightningModule):
 
         # Front-end (shared with TDS model)
         self.spec_norm = SpectrogramNorm(
-            channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS
+            channels=self.NUM_BANDS * electrode_channels
         )
         self.multiband_mlp = MultiBandRotationInvariantMLP(
             in_features=in_features,
@@ -614,6 +615,7 @@ class TransformerCTCModule(pl.LightningModule):
         optimizer: DictConfig,
         lr_scheduler: DictConfig,
         decoder: DictConfig,
+        electrode_channels: int = 16,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -622,7 +624,7 @@ class TransformerCTCModule(pl.LightningModule):
 
         # Front-end (shared with other models)
         self.spec_norm = SpectrogramNorm(
-            channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS
+            channels=self.NUM_BANDS * electrode_channels
         )
         self.multiband_mlp = MultiBandRotationInvariantMLP(
             in_features=in_features,

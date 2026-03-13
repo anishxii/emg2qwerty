@@ -1,0 +1,18 @@
+# @package _global_
+module:
+  _target_: emg2qwerty.lightning.CNNBiLSTMCTCModule
+  in_features: 132  # (n_fft // 2 + 1) * n_channels = 33 * 4
+  electrode_channels: 4
+  mlp_features: [384]
+  cnn_channels: 256
+  cnn_layers: 3
+  cnn_kernel_size: 5
+  cnn_dropout: 0.1
+  lstm_hidden_size: 256
+  lstm_num_layers: 2
+  lstm_dropout: 0.3
+
+datamodule:
+  _target_: emg2qwerty.lightning.WindowedEMGDataModule
+  window_length: 8000
+  padding: [1800, 200]
