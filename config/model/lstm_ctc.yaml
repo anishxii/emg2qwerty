@@ -13,6 +13,9 @@ module:
   lstm_num_layers: 2
   bidirectional: true
   dropout: 0.1
+  optimizer: ${optimizer.adamw}
+  lr_scheduler: ${lr_scheduler.none}
+  decoder: ${decoder.default}
 
 datamodule:
   _target_: emg2qwerty.lightning.WindowedEMGDataModule
