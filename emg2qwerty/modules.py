@@ -4,6 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
 from collections.abc import Sequence
 
 import torch
@@ -238,6 +239,75 @@ class TDSFullyConnectedBlock(nn.Module):
         x = self.fc_block(x)
         x = x + inputs
         return self.layer_norm(x)  # TNC
+
+
+class PositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding as per 'Attention is All You Need'.
+
+    Args:
+        d_model: Embedding dimension.
+        dropout: Dropout probability applied after adding positional encoding.
+        max_len: Maximum sequence length to precompute encodings for.
+    """
+
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 2000) -> None:
+        super().__init__()
+        self.dropout = nn.Dropout(dropout)
+
+        position = torch.arange(max_len).unsqueeze(1)  # (max_len, 1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
+        )
+        pe = torch.zeros(max_len, 1, d_model)  # TNC format
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer("pe", pe)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        # inputs: (T, N, d_model)
+        return self.dropout(inputs + self.pe[: inputs.size(0)])
+
+
+class ConvDownsampler(nn.Module):
+    """Two stride-2 Conv1d layers providing 4x temporal downsampling.
+
+    Used before a Transformer encoder to reduce sequence length and
+    improve attention efficiency. Each Conv1d uses kernel=3, stride=2,
+    padding=1 so that: L_out = floor((L_in - 1) / 2) + 1 = ceil(L_in / 2).
+
+    After two layers: T_out ≈ T_in / 4.
+
+    Args:
+        in_features: Number of input channels.
+        d_model: Output dimension (also used as intermediate channel count).
+        dropout: Dropout probability after each conv block.
+    """
+
+    def __init__(self, in_features: int, d_model: int, dropout: float = 0.1) -> None:
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Conv1d(in_features, d_model, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        # (T, N, C) -> (N, C, T) -> conv -> (T', N, d_model)
+        x = inputs.permute(1, 2, 0)
+        x = self.layers(x)
+        return x.permute(2, 0, 1)
+
+    @staticmethod
+    def output_lengths(input_lengths: torch.Tensor) -> torch.Tensor:
+        """Compute output sequence lengths after 4x downsampling."""
+        # Each stride-2 conv with kernel=3, padding=1:
+        # L_out = floor((L_in - 1) / 2) + 1 = (L_in + 1) // 2
+        lengths = (input_lengths + 1) // 2  # after first conv
+        lengths = (lengths + 1) // 2        # after second conv
+        return lengths
 
 
 class CNNEncoder(nn.Module):

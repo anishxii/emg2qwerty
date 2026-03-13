@@ -23,7 +23,9 @@ from emg2qwerty.data import LabelData, WindowedEMGDataset
 from emg2qwerty.metrics import CharacterErrorRates
 from emg2qwerty.modules import (
     CNNEncoder,
+    ConvDownsampler,
     MultiBandRotationInvariantMLP,
+    PositionalEncoding,
     SpectrogramNorm,
     TDSConvEncoder,
 )
@@ -370,6 +372,167 @@ class CNNBiLSTMCTCModule(pl.LightningModule):
         # CNN uses same-padding so T_diff == 0; kept for correctness
         T_diff = inputs.shape[0] - emissions.shape[0]
         emission_lengths = input_lengths - T_diff
+
+        loss = self.ctc_loss(
+            log_probs=emissions,
+            targets=targets.transpose(0, 1),
+            input_lengths=emission_lengths,
+            target_lengths=target_lengths,
+        )
+
+        predictions = self.decoder.decode_batch(
+            emissions=emissions.detach().cpu().numpy(),
+            emission_lengths=emission_lengths.detach().cpu().numpy(),
+        )
+
+        metrics = self.metrics[f"{phase}_metrics"]
+        targets = targets.detach().cpu().numpy()
+        target_lengths = target_lengths.detach().cpu().numpy()
+        for i in range(N):
+            target = LabelData.from_labels(targets[: target_lengths[i], i])
+            metrics.update(prediction=predictions[i], target=target)
+
+        self.log(f"{phase}/loss", loss, batch_size=N, sync_dist=True)
+        return loss
+
+    def _epoch_end(self, phase: str) -> None:
+        metrics = self.metrics[f"{phase}_metrics"]
+        self.log_dict(metrics.compute(), sync_dist=True)
+        metrics.reset()
+
+    def training_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("train", *args, **kwargs)
+
+    def validation_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("val", *args, **kwargs)
+
+    def test_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("test", *args, **kwargs)
+
+    def on_train_epoch_end(self) -> None:
+        self._epoch_end("train")
+
+    def on_validation_epoch_end(self) -> None:
+        self._epoch_end("val")
+
+    def on_test_epoch_end(self) -> None:
+        self._epoch_end("test")
+
+    def configure_optimizers(self) -> dict[str, Any]:
+        return utils.instantiate_optimizer_and_scheduler(
+            self.parameters(),
+            optimizer_config=self.hparams.optimizer,
+            lr_scheduler_config=self.hparams.lr_scheduler,
+        )
+
+
+class TransformerCTCModule(pl.LightningModule):
+    NUM_BANDS: ClassVar[int] = 2
+    ELECTRODE_CHANNELS: ClassVar[int] = 16
+
+    def __init__(
+        self,
+        in_features: int,
+        mlp_features: Sequence[int],
+        d_model: int,
+        nhead: int,
+        num_layers: int,
+        dim_feedforward: int,
+        dropout: float,
+        optimizer: DictConfig,
+        lr_scheduler: DictConfig,
+        decoder: DictConfig,
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+
+        num_features = self.NUM_BANDS * mlp_features[-1]
+
+        # Front-end (shared with other models)
+        self.spec_norm = SpectrogramNorm(
+            channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS
+        )
+        self.multiband_mlp = MultiBandRotationInvariantMLP(
+            in_features=in_features,
+            mlp_features=mlp_features,
+            num_bands=self.NUM_BANDS,
+        )
+        self.flatten = nn.Flatten(start_dim=2)
+
+        # 4x temporal downsampling: (T, N, num_features) -> (T/4, N, d_model)
+        self.downsampler = ConvDownsampler(
+            in_features=num_features,
+            d_model=d_model,
+            dropout=dropout,
+        )
+
+        # Positional encoding + Transformer encoder
+        self.pos_encoding = PositionalEncoding(d_model=d_model, dropout=dropout)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=False,  # expects (T, N, d_model)
+        )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer=encoder_layer,
+            num_layers=num_layers,
+        )
+
+        # Output projection
+        self.output_proj = nn.Linear(d_model, charset().num_classes)
+        self.log_softmax = nn.LogSoftmax(dim=-1)
+
+        # Criterion
+        self.ctc_loss = nn.CTCLoss(blank=charset().null_class)
+
+        # Decoder
+        self.decoder = instantiate(decoder)
+
+        # Metrics
+        metrics = MetricCollection([CharacterErrorRates()])
+        self.metrics = nn.ModuleDict(
+            {
+                f"{phase}_metrics": metrics.clone(prefix=f"{phase}/")
+                for phase in ["train", "val", "test"]
+            }
+        )
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        src_key_padding_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        x = self.spec_norm(inputs)           # (T, N, 2, 16, 33)
+        x = self.multiband_mlp(x)            # (T, N, 2, 384)
+        x = self.flatten(x)                  # (T, N, 768)
+        x = self.downsampler(x)              # (T/4, N, d_model)
+        x = self.pos_encoding(x)
+        x = self.transformer(x, src_key_padding_mask=src_key_padding_mask)
+        x = self.output_proj(x)              # (T/4, N, num_classes)
+        return self.log_softmax(x)
+
+    def _step(
+        self, phase: str, batch: dict[str, torch.Tensor], *args, **kwargs
+    ) -> torch.Tensor:
+        inputs = batch["inputs"]
+        targets = batch["targets"]
+        input_lengths = batch["input_lengths"]
+        target_lengths = batch["target_lengths"]
+        N = len(input_lengths)
+
+        # Compute downsampled lengths for CTC and attention mask
+        emission_lengths = ConvDownsampler.output_lengths(input_lengths)
+
+        # Build padding mask: True = ignore (padding positions)
+        T_out = int((input_lengths.max().item() + 3) // 4)
+        padding_mask = (
+            torch.arange(T_out, device=self.device).expand(N, T_out)
+            >= emission_lengths.unsqueeze(1)
+        )
+
+        emissions = self.forward(inputs, src_key_padding_mask=padding_mask)
 
         loss = self.ctc_loss(
             log_probs=emissions,
