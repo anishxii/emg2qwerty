@@ -29,6 +29,9 @@ RUNS=(
   # --- Axis 3: Sampling rate ---
   "sr1khz:::model=cnn_bilstm_ctc transforms=log_spectrogram_1khz"
   "sr500hz:::model=cnn_bilstm_ctc transforms=log_spectrogram_500hz"
+
+  # --- Novel architecture: cross-band attention (Transformer) ---
+  "cross_attn:::model=transformer_ctc_cross_attn"
 )
 
 TOTAL=${#RUNS[@]}
